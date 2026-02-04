@@ -1,0 +1,121 @@
+.program bitstream
+.define PUBLIC SIDE_PIN_COUNT 1
+
+; Re-create bitstream from XOR gate output,
+; which gives a 1-pulse for every edge (set bit)
+; and no pulse for every clear bit
+;
+; ADAT encoding is:     bits
+; sync: 0000'0000'001   11
+; user: uuuu1            5
+; smp1: ssss1 x6        30 
+; smp2: ssss1 x6        30 
+; smp3: ssss1 x6        30 
+; smp4: ssss1 x6        30 
+; smp5: ssss1 x6        30 
+; smp6: ssss1 x6        30 
+; smp7: ssss1 x6        30 
+; smp8: ssss1 x6        30 
+;=========================
+;          11+5+8*30 = 256
+.side_set SIDE_PIN_COUNT
+
+// We expect to get here within 1 state machine cycle
+// of the start of the pulse signalling a set bit in 
+// the ADAT bitstream:
+onebit: // add some delay here to get pulse sense window correct
+    set y,1    side 0 [3]// make a 1 bit...
+    in  y,1    side 1 [2] // and send to output
+
+//    jmp x--,in1 side 0
+//in1: // debug bit count
+//    set y,4    side 0 [4] // reset sync timeout: max 4 '0' bits in a row
+
+    set y,4    side 0  // reset sync timeout: max 4 '0' bits in a row
+    //set PINS,1 side 0 [1] // would be IN 1
+nextbit:    
+    jmp PIN,onebit side 0 // PIN set by pio_sm_set_jmp_pin() 
+    jmp PIN,onebit side 0 // can't choose polarity, so
+    jmp PIN,onebit side 0 // will ONLY jump if it's high
+
+    jmp PIN,onebit side 0
+    jmp PIN,onebit side 0
+    jmp PIN,onebit side 0
+
+    jmp PIN,onebit side 0
+    jmp PIN,onebit side 0
+    jmp PIN,onebit side 0
+    
+    jmp PIN,onebit side 0
+    in NULL,1      side 0 // set PINS,0      side 0 // would be IN 0
+
+//    jmp x--,in2 side 0
+//in2: // debug bit count
+
+    jmp y--,nextbit side 0 // if not timed out, could be more data
+
+    // At this point we've had 5/10 zero bits of the sync sequence
+    // put into the ISR, unless we've lost sync. Now's our chance
+    // to recover sync:
+    mov ISR,NULL side 1  // clear the shift counter (source doesn't matter...)
+
+//    in  X,32  side 1 // send (down) count
+
+    in  NULL,10  side 1  // timeout - fill last 00000'00000 bits and wait
+.wrap_target
+    jmp PIN,onebit side 1 // wait for end of 00000'00000'1 frame sync
+.wrap
+
+% c-sdk {
+uint theSM;
+
+static inline int bitstream_program_init(PIO pio,  // which PIO
+                                     uint pin,      // output+sideset pin base
+                                     uint jmppin    // jump pin
+                                     ) 
+{
+    int result = -1; // couldn't add program
+    uint offset = pio_add_program(pio, &bitstream_program);
+    if (offset >= 0) // loaded OK
+    {
+        // Serial.printf("Loaded at %d\n",offset);
+        uint sm = pio_claim_unused_sm(pio, true);
+        if (sm >= 0)
+        {    
+            pio_sm_config c = bitstream_program_get_default_config(offset);
+
+            // Set up autopush: shift left, autopush after 32 bits
+            sm_config_set_in_shift(&c, false, true, 32);
+
+            // Map the state machine's SIDESET pin group to one pin, 
+            // namely the `pin` parameter to this function.
+            sm_config_set_sideset_pin_base(&c, pin);
+
+            // SET pin is the next one
+            sm_config_set_set_pin_base(&c, pin+1);
+            sm_config_set_set_pin_count(&c, 1);
+
+            // JMP pin setting
+            sm_config_set_jmp_pin(&c,jmppin);
+
+            // Join both FIFOs together and use for receive
+            sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+
+            for (int i=0;i<bitstream_SIDE_PIN_COUNT+1;i++)
+                pio_gpio_init(pio, pin+i);    // Set the pin direction to output at the PIO
+
+            pio_sm_set_consecutive_pindirs(pio, sm, pin, bitstream_SIDE_PIN_COUNT+1, true);
+
+            // Load our configuration, and jump to the start of the program
+            pio_sm_init(pio, sm, offset, &c);
+
+            // Set the state machine running
+            //pio_sm_set_enabled(pio, sm, true);
+
+            theSM = sm;
+            result = offset; // loader adds from the end!
+        }
+    }
+    return result;
+}
+%}

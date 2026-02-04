@@ -39,3 +39,6 @@
 
 # debug information files
 *.dwo
+
+# PIO headers assembled from .pioasm files
+*.pio.h

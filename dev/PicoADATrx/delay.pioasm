@@ -1,0 +1,52 @@
+.program delay
+
+; Repeatedly echo incoming bit to output pin,
+; delaying it by a few cycles (note 2-cycle
+; sync makes delay longer than is obvious)
+.side_set 1
+
+.wrap_target
+    wait 1 pin,0 side 0 // set side-set to 0, wait for GPIOxx to go high
+    wait 0 pin,0 side 1
+.wrap
+
+
+% c-sdk {
+static inline int delay_program_init(PIO pio,      // which PIO
+                                     uint inPin,    // input pin
+                                     uint outPin   // sideset pin
+                                     ) 
+{
+    int result = -1;
+    static int offset = -1;
+    if (-1 == offset)  // not yet added
+        offset = pio_add_program(pio, &delay_program);   // offset in program memory
+    if (offset >= 0)
+    {
+        // Serial.printf("Loaded at %d\n",offset);
+        uint sm = pio_claim_unused_sm(pio, true);       // SM in PIO
+        if (sm >= 0)
+        {
+            pio_sm_config c = delay_program_get_default_config(offset);
+
+            // Map the state machine's pin groups
+            sm_config_set_in_pin_base(&c, inPin);
+            sm_config_set_sideset_pin_base(&c, outPin);
+
+            // Set the output pin's GPIO function (connect PIO to the pad)
+            pio_gpio_init(pio, outPin);
+
+            // Set the pin direction to output at the PIO
+            pio_sm_set_consecutive_pindirs(pio, sm, outPin, 1, true);
+
+            // Load our configuration, and jump to the start of the program
+            pio_sm_init(pio, sm, offset, &c);
+            // Set the state machine running
+            pio_sm_set_enabled(pio, sm, true);
+
+            result = offset; // loader adds from the end!
+        }
+    }
+    return result;
+}
+%}
